@@ -7,32 +7,41 @@ const SOURCES = {
 
 export default async function handler(req, res) {
   const source = String(req.query?.source || '').toLowerCase();
-  const baseUrl = SOURCES[source];
+  const url = SOURCES[source];
 
-  if (!baseUrl) {
+  if (!url) {
     return res.status(400).json({ error: 'Invalid source' });
   }
 
-  try {
-    // IMPORTANT: add a cache-busting parameter to the Google Sheets URL itself.
-    // The browser already cache-busts /api/sheets, but without this parameter
-    // the Vercel function could still receive a cached Google CSV response.
-    const googleUrl = new URL(baseUrl);
-    googleUrl.searchParams.set('_dashboard_refresh', String(Date.now()));
+  // IMPORTANT:
+  // Do NOT append arbitrary cache-busting query parameters to Google's
+  // published /pub CSV URL. Google can reject modified Publish-to-web URLs.
+  // The dashboard itself cache-busts /api/sheets, while this proxy asks
+  // Google for the exact published CSV URL.
+  const fetchUpstream = async () => fetch(url, {
+    method: 'GET',
+    redirect: 'follow',
+    cache: 'no-store',
+    headers: {
+      'Cache-Control': 'no-cache, no-store, max-age=0',
+      'Pragma': 'no-cache',
+      'Accept': 'text/csv,text/plain,*/*'
+    }
+  });
 
-    const upstream = await fetch(googleUrl.toString(), {
-      method: 'GET',
-      redirect: 'follow',
-      cache: 'no-store',
-      headers: {
-        'Cache-Control': 'no-cache, no-store, max-age=0',
-        'Pragma': 'no-cache'
-      }
-    });
+  try {
+    let upstream = await fetchUpstream();
+
+    // A short retry helps with transient Google/Vercel upstream failures.
+    if (!upstream.ok) {
+      await new Promise(resolve => setTimeout(resolve, 700));
+      upstream = await fetchUpstream();
+    }
 
     if (!upstream.ok) {
-      return res.status(upstream.status).json({
-        error: `Google Sheets returned HTTP ${upstream.status}`
+      const detail = await upstream.text().catch(() => '');
+      return res.status(502).json({
+        error: `${source}: Google Sheets returned HTTP ${upstream.status}${detail ? ` — ${detail.slice(0, 180)}` : ''}`
       });
     }
 
@@ -40,17 +49,19 @@ export default async function handler(req, res) {
 
     if (!csv || !csv.trim()) {
       return res.status(502).json({
-        error: 'Google Sheets returned an empty response'
+        error: `${source}: Google Sheets returned an empty response.`
       });
     }
 
-    // If the Google publication is unavailable or incorrectly configured,
-    // Google can sometimes return an HTML page instead of CSV. Detect that
-    // explicitly so the dashboard does not treat it as valid data.
+    // Google can sometimes return an HTML error page instead of CSV.
     const trimmed = csv.trimStart().toLowerCase();
-    if (trimmed.startsWith('<!doctype html') || trimmed.startsWith('<html')) {
+    if (
+      trimmed.startsWith('<!doctype html') ||
+      trimmed.startsWith('<html') ||
+      trimmed.startsWith('<head')
+    ) {
       return res.status(502).json({
-        error: 'Google Sheets did not return CSV. Check that the sheet is published to the web.'
+        error: `${source}: Google Sheets returned HTML instead of CSV. Check Publish to web / CSV access.`
       });
     }
 
@@ -68,9 +79,9 @@ export default async function handler(req, res) {
 
     return res.status(200).send(csv);
   } catch (error) {
-    console.error('Google Sheets proxy error:', error);
+    console.error(`Google Sheets proxy error [${source}]:`, error);
     return res.status(502).json({
-      error: `Unable to retrieve Google Sheets data: ${error?.message || 'Unknown error'}`
+      error: `${source}: Unable to retrieve Google Sheets data. ${error?.message || 'Unknown error'}`
     });
   }
 }

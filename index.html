@@ -2060,7 +2060,8 @@
       } catch (err) {
         console.error('Live Google Sheets update failed:', err);
         liveDataSource = 'Fallback snapshot';
-        setLiveStatus('Live update unavailable', false);
+        const failureMessage = err?.message || 'Unknown refresh error';
+        setLiveStatus(`Refresh failed · ${failureMessage}`, false);
 
         // Keep the last successful RAW dataset instead of replacing it with
         // an empty/partial response. This prevents a failed refresh from
@@ -2068,7 +2069,7 @@
         if (!silent) {
           render();
           const btn = document.getElementById('live-refresh-btn');
-          if (btn) btn.title = `Refresh failed: ${err.message}`;
+          if (btn) btn.title = `Refresh failed: ${failureMessage}`;
         }
 
         return false;

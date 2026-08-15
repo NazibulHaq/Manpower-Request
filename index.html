@@ -1238,6 +1238,29 @@
       transform: scale(1.01);
       box-shadow: inset 0 0 0 1px rgba(122, 154, 247, .55);
     }
+
+    /* Live data refresh button */
+    .refresh-btn {
+      cursor: pointer;
+      border: none;
+      transition: all .2s ease;
+      user-select: none;
+    }
+
+    .refresh-btn:hover {
+      transform: translateY(-1px);
+      filter: brightness(1.1);
+    }
+
+    .refresh-btn:active {
+      transform: translateY(0);
+    }
+
+    .refresh-btn.refreshing {
+      opacity: .7;
+      cursor: wait;
+      pointer-events: none;
+    }
   </style>
 </head>
 
@@ -1256,9 +1279,9 @@
         </div>
       </div>
       <div class="topbar-right">
-        <button id="live-refresh-btn" class="badge" style="cursor:pointer;border:none" onclick="loadLiveData()">↻ Refresh data</button>
+        <button id="live-refresh-btn" class="badge refresh-btn" type="button" onclick="manualRefreshData()" title="Refresh the dashboard with the latest Google Sheet data">↻ Refresh data</button>
         <span id="live-data-status" class="date-lbl">Loading live data…</span>
-        <span class="date-lbl">As of July 23, 2026</span>
+        <span id="dashboard-as-of" class="date-lbl">Checking Google Sheets…</span>
         <span class="badge">H2 FY2026</span>
       </div>
     </div>
@@ -1938,29 +1961,119 @@
       el.title = ok ? 'Live Google Sheets data' : 'Using embedded fallback data';
     }
 
+    function setDashboardUpdatedTime(date) {
+      const el = document.getElementById('dashboard-as-of');
+      if (!el || !date) return;
+      el.textContent = `Updated ${date.toLocaleString([], {
+        day: '2-digit',
+        month: 'short',
+        year: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit'
+      })}`;
+      el.title = 'Time when the dashboard last successfully loaded data from Google Sheets';
+    }
+
+    let liveRefreshInProgress = false;
+
+    async function manualRefreshData() {
+      if (liveRefreshInProgress) return;
+
+      const btn = document.getElementById('live-refresh-btn');
+
+      if (btn) {
+        btn.disabled = true;
+        btn.classList.add('refreshing');
+        btn.textContent = '⟳ Refreshing…';
+      }
+      setLiveStatus('Updating Google Sheets…', true);
+
+      try {
+        const success = await loadLiveData({ silent: false });
+
+        if (btn) {
+          btn.classList.remove('refreshing');
+          btn.textContent = success ? '✓ Updated' : '⚠ Refresh failed';
+          btn.disabled = false;
+          setTimeout(() => {
+            if (btn) btn.textContent = '↻ Refresh data';
+          }, success ? 1800 : 3000);
+        }
+      } finally {
+        if (btn) btn.disabled = false;
+      }
+    }
+
     async function loadLiveData({silent = false} = {}) {
-      if (!silent) setLiveStatus('Updating data…', true);
+      if (liveRefreshInProgress) return false;
+      liveRefreshInProgress = true;
+      if (!silent) setLiveStatus('Updating Google Sheets…', true);
+
       try {
         const stamp = Date.now();
-        const fetchCsv = async url => {
-          const res = await fetch(`${url}${url.includes('?') ? '&' : '?'}_=${stamp}`, { cache: 'no-store' });
-          if (!res.ok) throw new Error(`HTTP ${res.status}`);
-          return res.text();
+        const fetchCsv = async (url, sourceName) => {
+          const requestUrl = `${url}${url.includes('?') ? '&' : '?'}_=${stamp}`;
+          const res = await fetch(requestUrl, {
+            cache: 'no-store',
+            headers: { 'Cache-Control': 'no-cache' }
+          });
+
+          if (!res.ok) {
+            let detail = '';
+            try { detail = (await res.text()).slice(0, 200); } catch (e) {}
+            throw new Error(`${sourceName}: HTTP ${res.status}${detail ? ` — ${detail}` : ''}`);
+          }
+
+          const text = await res.text();
+          if (!text || !text.trim()) {
+            throw new Error(`${sourceName}: returned an empty response.`);
+          }
+          return text;
         };
+
         const [h2Text, hcText, mapText, spillText] = await Promise.all([
-          fetchCsv(LIVE_SOURCES.h2), fetchCsv(LIVE_SOURCES.hc), fetchCsv(LIVE_SOURCES.map), fetchCsv(LIVE_SOURCES.spill)
+          fetchCsv(LIVE_SOURCES.h2, 'H2 Manpower Plan'),
+          fetchCsv(LIVE_SOURCES.hc, 'Companywide HC'),
+          fetchCsv(LIVE_SOURCES.map, 'Department/Wing Map'),
+          fetchCsv(LIVE_SOURCES.spill, 'H1 Carry Forward')
         ]);
-        RAW = buildLiveRaw(h2Text, hcText, mapText, spillText);
+
+        // Build the complete live dataset first. Only replace RAW after all
+        // four Google Sheet sources have been fetched and validated.
+        const liveRaw = buildLiveRaw(h2Text, hcText, mapText, spillText);
+
+        if (!liveRaw || !liveRaw.h2_requests?.length || !liveRaw.employees?.length || !liveRaw.spillovers?.length) {
+          throw new Error('Live Google Sheets returned incomplete data. The previous dashboard data was kept.');
+        }
+
+        RAW = liveRaw;
         liveDataLastUpdated = new Date();
         liveDataSource = 'Live Google Sheets';
+
+        setDashboardUpdatedTime(liveDataLastUpdated);
+        setLiveStatus(`Live · ${liveDataLastUpdated.toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'})}`, true);
+
         rebuildFilterOptions();
         render();
-        setLiveStatus(`Live · ${liveDataLastUpdated.toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'})}`, true);
+
+        return true;
       } catch (err) {
         console.error('Live Google Sheets update failed:', err);
         liveDataSource = 'Fallback snapshot';
         setLiveStatus('Live update unavailable', false);
-        if (!silent) render();
+
+        // Keep the last successful RAW dataset instead of replacing it with
+        // an empty/partial response. This prevents a failed refresh from
+        // breaking the dashboard.
+        if (!silent) {
+          render();
+          const btn = document.getElementById('live-refresh-btn');
+          if (btn) btn.title = `Refresh failed: ${err.message}`;
+        }
+
+        return false;
+      } finally {
+        liveRefreshInProgress = false;
       }
     }
 
@@ -2541,7 +2654,21 @@
 
     render();
     loadLiveData({silent:true});
+
+    // Automatic refresh every 5 minutes while the dashboard is open.
     setInterval(() => loadLiveData({silent:true}), 5 * 60 * 1000);
+
+    // Refresh when the user returns to the dashboard tab.
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible') {
+        loadLiveData({silent:true});
+      }
+    });
+
+    // Refresh once the browser comes back online.
+    window.addEventListener('online', () => {
+      loadLiveData({silent:true});
+    });
   </script>
 </body>
 

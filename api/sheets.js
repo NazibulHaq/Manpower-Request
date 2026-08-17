@@ -2,24 +2,23 @@ import { google } from 'googleapis';
 
 /*
 ===========================================================
-H2 MANPOWER DASHBOARD - GOOGLE SHEETS API CONNECTION
+H2 MANPOWER DASHBOARD
+PRIVATE GOOGLE SHEETS API
 ===========================================================
 
-This replaces the old "Publish to Web / CSV" connection.
+This API reads the private Google Sheet through a
+Google service account.
 
-The dashboard still calls:
+The dashboard calls:
 
-    /api/sheets?source=h2
-    /api/sheets?source=hc
-    /api/sheets?source=map
-    /api/sheets?source=spill
+/api/sheets?source=h2
+/api/sheets?source=hc
+/api/sheets?source=map
+/api/sheets?source=spill
 
-This API now reads the PRIVATE Google Sheet directly.
-
-IMPORTANT:
-DO NOT put the service-account credentials in this file.
-
-The credentials must be stored in Vercel Environment Variables.
+The response is returned as CSV so the existing
+index.html/dashboard can continue using the same
+data-processing logic.
 
 ===========================================================
 */
@@ -27,7 +26,15 @@ The credentials must be stored in Vercel Environment Variables.
 
 /*
 -----------------------------------------------------------
-1. GOOGLE SPREADSHEET
+1. GOOGLE SPREADSHEET ID
+-----------------------------------------------------------
+
+Google Sheet:
+
+https://docs.google.com/spreadsheets/d/
+1ee3ujtOuQH9_3WSAwn5Yr7aruPg2Bz99BhhPlBGD6-A/edit
+
+Only the Spreadsheet ID is required here.
 -----------------------------------------------------------
 */
 
@@ -37,43 +44,41 @@ const SPREADSHEET_ID =
 
 /*
 -----------------------------------------------------------
-2. SHEET TAB GIDs
+2. EXACT GOOGLE SHEET TAB NAMES
 -----------------------------------------------------------
 
-These are the GIDs from your current workbook.
+These names MUST match the tabs in your Google Sheet.
 
-H2 FY26 Plan:
-1991353397
+Current tabs:
 
-H1 FY26 Spillover:
-208597519
-
-Companywide HC:
-1767679898
-
-Department + Wing Mapping:
-151350972
-
-If you change the structure later, update the GIDs here.
+H2 FY26 Plan
+Companywide HC
+DEPT + Wing Name
+H1 FY26 Spillover
 -----------------------------------------------------------
 */
 
-const SHEET_GIDS = {
+const SHEET_NAMES = {
 
-  h2: 1991353397,
+  h2: 'H2 FY26 Plan',
 
-  hc: 1767679898,
+  hc: 'Companywide HC',
 
-  map: 151350972,
+  map: 'DEPT + Wing Name',
 
-  spill: 208597519
+  spill: 'H1 FY26 Spillover'
 
 };
 
 
 /*
 -----------------------------------------------------------
-3. GOOGLE SHEETS READ-ONLY SCOPE
+3. GOOGLE SHEETS API PERMISSION
+-----------------------------------------------------------
+
+Read-only access is sufficient.
+
+The service account only needs to VIEW the spreadsheet.
 -----------------------------------------------------------
 */
 
@@ -84,16 +89,27 @@ const SCOPES = [
 
 /*
 -----------------------------------------------------------
-4. CREATE GOOGLE AUTH CLIENT
+4. CREATE GOOGLE AUTHENTICATION
 -----------------------------------------------------------
 
-The service account JSON is read from:
+IMPORTANT:
+
+The service-account credentials are NOT stored in this
+file.
+
+They are stored in Vercel as:
 
 GOOGLE_SERVICE_ACCOUNT_JSON
 
-in Vercel Environment Variables.
+Example Vercel setup:
 
-DO NOT paste the JSON credentials directly into GitHub.
+Key:
+GOOGLE_SERVICE_ACCOUNT_JSON
+
+Value:
+[the COMPLETE service-account JSON]
+
+Do NOT upload the JSON file to GitHub.
 -----------------------------------------------------------
 */
 
@@ -102,15 +118,18 @@ function getGoogleAuth() {
   const rawCredentials =
     process.env.GOOGLE_SERVICE_ACCOUNT_JSON;
 
+
   if (!rawCredentials) {
 
     throw new Error(
-      'GOOGLE_SERVICE_ACCOUNT_JSON is not configured in Vercel Environment Variables.'
+      'GOOGLE_SERVICE_ACCOUNT_JSON is missing from Vercel Environment Variables.'
     );
 
   }
 
+
   let credentials;
+
 
   try {
 
@@ -120,11 +139,15 @@ function getGoogleAuth() {
   } catch (error) {
 
     throw new Error(
-      'GOOGLE_SERVICE_ACCOUNT_JSON is not valid JSON. Paste the complete service-account JSON into the Vercel environment variable.'
+      'GOOGLE_SERVICE_ACCOUNT_JSON is not valid JSON. Make sure you pasted the complete service-account JSON into Vercel.'
     );
 
   }
 
+
+  /*
+  Check required service-account fields.
+  */
 
   if (!credentials.client_email) {
 
@@ -145,39 +168,19 @@ function getGoogleAuth() {
 
 
   /*
-  -------------------------------------------------------
-  OPTIONAL DOMAIN-WIDE DELEGATION
-  -------------------------------------------------------
-
-  If your company does NOT allow you to share the Sheet
-  directly with the service-account email, your Google
-  Workspace administrator can configure Domain-Wide
-  Delegation.
-
-  If GOOGLE_IMPERSONATE_USER exists, the service account
-  will impersonate that company Google account.
-
-  Example:
-
-  GOOGLE_IMPERSONATE_USER=nazibul.haq@nextventures.io
-
-  Otherwise the service account accesses the Sheet directly.
-  -------------------------------------------------------
+  Create JWT authentication.
   */
-
-  const impersonateUser =
-    process.env.GOOGLE_IMPERSONATE_USER || null;
-
 
   return new google.auth.JWT({
 
-    email: credentials.client_email,
+    email:
+      credentials.client_email,
 
-    key: credentials.private_key,
+    key:
+      credentials.private_key,
 
-    scopes: SCOPES,
-
-    subject: impersonateUser || undefined
+    scopes:
+      SCOPES
 
   });
 
@@ -186,19 +189,18 @@ function getGoogleAuth() {
 
 /*
 -----------------------------------------------------------
-5. CREATE SHEETS API CLIENT
+5. CREATE GOOGLE SHEETS CLIENT
 -----------------------------------------------------------
 */
 
 function getSheetsClient() {
 
-  const auth = getGoogleAuth();
-
   return google.sheets({
 
     version: 'v4',
 
-    auth
+    auth:
+      getGoogleAuth()
 
   });
 
@@ -207,79 +209,118 @@ function getSheetsClient() {
 
 /*
 -----------------------------------------------------------
-6. GET SHEET TITLE FROM GID
+6. FIND A TAB BY ITS NAME
 -----------------------------------------------------------
 
-We use the GID rather than hardcoding the tab name.
+We intentionally use the tab name instead of the GID.
 
-This means the dashboard keeps working even if the tab
-name contains spaces, &, +, etc.
+This is safer because the GID does not need to be
+maintained in the dashboard code.
+
+If you rename a tab in the future, update SHEET_NAMES above.
 -----------------------------------------------------------
 */
 
-async function getSheetTitle(sheets, gid) {
+async function getSheetByName(
+  sheets,
+  sheetName
+) {
 
   const response =
     await sheets.spreadsheets.get({
 
-      spreadsheetId: SPREADSHEET_ID,
+      spreadsheetId:
+        SPREADSHEET_ID,
 
-      fields: 'sheets(properties(sheetId,title))'
+      fields:
+        'spreadsheetId,properties.title,sheets.properties'
 
     });
 
 
-  const allSheets =
+  const sheetsList =
     response.data.sheets || [];
 
 
   const matchingSheet =
-    allSheets.find(
+    sheetsList.find(
 
       sheet =>
-        Number(sheet.properties.sheetId) === Number(gid)
+        sheet.properties &&
+        sheet.properties.title === sheetName
 
     );
 
 
+  /*
+  If the tab doesn't exist, provide a useful error
+  including the actual available tab names.
+  */
+
   if (!matchingSheet) {
 
+    const availableTabs =
+      sheetsList
+
+        .map(
+          sheet =>
+            sheet.properties?.title
+        )
+
+        .filter(Boolean)
+
+        .join(', ');
+
+
     throw new Error(
-      `No Google Sheet tab was found for GID ${gid}.`
+
+      `Google Sheet tab "${sheetName}" was not found. ` +
+      `Available tabs: ${availableTabs}`
+
     );
 
   }
 
 
-  return matchingSheet.properties.title;
+  return matchingSheet.properties;
 
 }
 
 
 /*
 -----------------------------------------------------------
-7. READ A SHEET TAB
+7. READ GOOGLE SHEET TAB
 -----------------------------------------------------------
 
-A:ZZ gives us a wide enough range for the current
-dashboard data.
+Reads columns A through ZZ.
 
-The returned Google Sheets values are converted into
-CSV because your existing index.html already knows how
-to parse CSV.
-
-Therefore we don't need to rewrite the dashboard.
+This gives enough room for the current manpower data
+while allowing the Sheet to expand horizontally later.
 -----------------------------------------------------------
 */
 
-async function readSheetAsCSV(sheets, gid) {
-
-  const title =
-    await getSheetTitle(sheets, gid);
+async function readSheetAsCSV(
+  sheets,
+  sheetName
+) {
 
 
   /*
-  Escape single quotes in sheet names.
+  First confirm that the tab exists.
+  */
+
+  const properties =
+    await getSheetByName(
+
+      sheets,
+
+      sheetName
+
+    );
+
+
+  /*
+  Escape apostrophes in tab names.
 
   Example:
 
@@ -290,24 +331,34 @@ async function readSheetAsCSV(sheets, gid) {
   'John''s Data'
   */
 
-  const safeTitle =
-    `'${title.replace(/'/g, "''")}'`;
+  const escapedTitle =
+    `'${properties.title.replace(/'/g, "''")}'`;
 
 
-  const range =
-    `${safeTitle}!A:ZZ`;
-
+  /*
+  Read the current values directly from Google Sheets.
+  */
 
   const response =
     await sheets.spreadsheets.values.get({
 
-      spreadsheetId: SPREADSHEET_ID,
+      spreadsheetId:
+        SPREADSHEET_ID,
 
-      range,
+      range:
+        `${escapedTitle}!A:ZZ`,
 
-      majorDimension: 'ROWS',
+      majorDimension:
+        'ROWS',
 
-      valueRenderOption: 'FORMATTED_VALUE'
+      /*
+      Use displayed/ formatted values so dates and
+      existing Sheet formatting are returned in a
+      dashboard-friendly format.
+      */
+
+      valueRenderOption:
+        'FORMATTED_VALUE'
 
     });
 
@@ -316,14 +367,24 @@ async function readSheetAsCSV(sheets, gid) {
     response.data.values || [];
 
 
+  /*
+  Empty sheet check.
+  */
+
   if (!values.length) {
 
     throw new Error(
-      `Google Sheet tab "${title}" returned no data.`
+
+      `Google Sheet tab "${sheetName}" returned no data.`
+
     );
 
   }
 
+
+  /*
+  Convert the Google Sheets array into CSV.
+  */
 
   return valuesToCSV(values);
 
@@ -332,7 +393,7 @@ async function readSheetAsCSV(sheets, gid) {
 
 /*
 -----------------------------------------------------------
-8. CONVERT GOOGLE SHEETS VALUES → CSV
+8. GOOGLE SHEETS VALUES → CSV
 -----------------------------------------------------------
 */
 
@@ -346,27 +407,46 @@ function valuesToCSV(values) {
 
         .map(value => {
 
+          /*
+          Convert null / undefined to blank.
+          */
+
           const text =
-            value === null || value === undefined
+
+            value === null ||
+            value === undefined
+
               ? ''
+
               : String(value);
 
 
           /*
-          CSV escaping:
-          - double quotes become ""
-          - fields containing commas/newlines/quotes
-            are wrapped in double quotes
+          CSV requires fields containing:
+
+          ,
+          "
+          line breaks
+
+          to be wrapped in quotes.
           */
 
           if (
+
             text.includes(',') ||
             text.includes('"') ||
             text.includes('\n') ||
             text.includes('\r')
+
           ) {
 
-            return `"${text.replace(/"/g, '""')}"`;
+            return (
+
+              '"' +
+              text.replace(/"/g, '""') +
+              '"'
+
+            );
 
           }
 
@@ -386,67 +466,118 @@ function valuesToCSV(values) {
 
 /*
 -----------------------------------------------------------
-9. API HANDLER
+9. VERCEL API HANDLER
 -----------------------------------------------------------
 */
 
-export default async function handler(req, res) {
+export default async function handler(
+  req,
+  res
+) {
+
 
   /*
-  Prevent browser/CDN caching.
+  ---------------------------------------------------------
+  PREVENT CACHING
+  ---------------------------------------------------------
+
+  This is important for your Refresh button.
+
+  We don't want Vercel/browser/CDN to return an old
+  Google Sheet response.
   */
 
   res.setHeader(
+
     'Cache-Control',
+
     'no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0'
+
   );
 
+
   res.setHeader(
+
     'CDN-Cache-Control',
+
     'no-store'
+
   );
 
+
   res.setHeader(
+
     'Vercel-CDN-Cache-Control',
+
     'no-store'
+
   );
 
+
   res.setHeader(
+
     'Pragma',
+
     'no-cache'
+
   );
 
 
   /*
-  Identify requested dataset.
+  ---------------------------------------------------------
+  GET REQUESTED SOURCE
+  ---------------------------------------------------------
   */
 
   const source =
+
     String(
       req.query?.source || ''
-    ).toLowerCase();
+    )
+
+    .trim()
+
+    .toLowerCase();
 
 
-  const gid =
-    SHEET_GIDS[source];
+  /*
+  Find the corresponding Sheet tab.
+  */
+
+  const sheetName =
+    SHEET_NAMES[source];
 
 
-  if (!gid) {
+  /*
+  Validate source.
+  */
 
-    return res.status(400).json({
+  if (!sheetName) {
 
-      error:
-        `Invalid source "${source}". Valid sources are: h2, hc, map, spill.`
+    return res
 
-    });
+      .status(400)
+
+      .json({
+
+        ok: false,
+
+        error:
+          `Invalid source "${source}". ` +
+          `Valid sources are: h2, hc, map, spill.`
+
+      });
 
   }
 
 
   try {
 
+
     /*
-    Create authenticated Google Sheets client.
+    -------------------------------------------------------
+    CREATE AUTHENTICATED GOOGLE SHEETS CLIENT
+    -------------------------------------------------------
     */
 
     const sheets =
@@ -454,95 +585,164 @@ export default async function handler(req, res) {
 
 
     /*
-    Read the requested Sheet tab.
+    -------------------------------------------------------
+    READ LIVE GOOGLE SHEET DATA
+    -------------------------------------------------------
     */
 
     const csv =
       await readSheetAsCSV(
+
         sheets,
-        gid
+
+        sheetName
+
       );
 
 
     /*
-    Validate response.
+    Make sure data was actually returned.
     */
 
-    if (
-      !csv ||
-      !csv.trim()
-    ) {
+    if (!csv || !csv.trim()) {
 
       throw new Error(
-        `Google Sheet returned an empty response for source "${source}".`
+
+        `Google Sheet tab "${sheetName}" returned empty data.`
+
       );
 
     }
 
 
     /*
-    Send CSV to existing dashboard.
+    -------------------------------------------------------
+    RESPONSE HEADERS
+    -------------------------------------------------------
     */
 
     res.setHeader(
+
       'Content-Type',
+
       'text/csv; charset=utf-8'
+
     );
 
 
     res.setHeader(
+
       'Access-Control-Allow-Origin',
+
       '*'
+
     );
 
 
+    /*
+    Useful diagnostic headers.
+    */
+
     res.setHeader(
-      'X-Google-Sheets-Source',
+
+      'X-Sheets-Source',
+
       source
+
     );
 
 
     res.setHeader(
-      'X-Google-Sheets-GID',
-      String(gid)
+
+      'X-Sheets-Tab',
+
+      sheetName
+
     );
 
 
     res.setHeader(
-      'X-Google-Sheets-Fetched-At',
+
+      'X-Sheets-Fetched-At',
+
       new Date().toISOString()
+
     );
 
+
+    /*
+    -------------------------------------------------------
+    RETURN LIVE DATA
+    -------------------------------------------------------
+    */
 
     return res
+
       .status(200)
+
       .send(csv);
 
 
   } catch (error) {
 
+
+    /*
+    -------------------------------------------------------
+    ERROR HANDLING
+    -------------------------------------------------------
+    */
+
     console.error(
+
       `Google Sheets API error [${source}]:`,
+
       error
+
     );
 
 
-    /*
-    Try to give the dashboard a useful error message
-    rather than simply "Refresh failed".
-    */
-
     const message =
+
       error?.message ||
+
       'Unknown Google Sheets API error';
 
 
-    return res.status(502).json({
+    /*
+    Return the actual reason to the browser.
 
-      error:
-        `${source}: ${message}`
+    This means if something fails, you can open:
 
-    });
+    /api/sheets?source=h2
+
+    and see the error without needing Developer Tools.
+    */
+
+    return res
+
+      .status(502)
+
+      .json({
+
+        ok: false,
+
+        source:
+
+          source,
+
+        sheet:
+
+          sheetName,
+
+        error:
+
+          message,
+
+        timestamp:
+
+          new Date().toISOString()
+
+      });
 
   }
 

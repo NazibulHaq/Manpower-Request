@@ -1,0 +1,8 @@
+{
+  "name": "h2-manpower-dashboard",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "googleapis": "^173.0.0"
+  }
+}
